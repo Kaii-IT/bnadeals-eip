@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+    xmlns:http="http://www.mulesoft.org/schema/mule/http"
+    xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+    xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+    xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- ===================== CONNECTOR CONFIGS ===================== -->
+
+    <http:listener-config name="HTTP_Listener_config_8081" doc:name="HTTP Listener config 8081">
+        <http:listener-connection host="0.0.0.0" port="8081" />
+    </http:listener-config>
+
+    <http:listener-config name="HTTP_Listener_config_8082" doc:name="HTTP Listener config 8082">
+        <http:listener-connection host="0.0.0.0" port="8082" />
+    </http:listener-config>
+
+    <http:listener-config name="HTTP_Listener_config_8083" doc:name="HTTP Listener config 8083">
+        <http:listener-connection host="0.0.0.0" port="8083" />
+    </http:listener-config>
+
+    <http:listener-config name="HTTP_Listener_config_8084" doc:name="HTTP Listener config 8084">
+        <http:listener-connection host="0.0.0.0" port="8084" />
+    </http:listener-config>
+
+    <http:listener-config name="HTTP_Listener_config_8085" doc:name="HTTP Listener config 8085">
+        <http:listener-connection host="0.0.0.0" port="8085" />
+    </http:listener-config>
+
+    <vm:config name="VM_Config" doc:name="VM Config">
+        <vm:queues>
+            <vm:queue queueName="sales-inquiry-queue" queueType="TRANSIENT" />
+            <vm:queue queueName="financing-error-queue" queueType="TRANSIENT" />
+        </vm:queues>
+    </vm:config>
+
+    <!-- ===================== TASK 1: MESSAGE CHANNELS ===================== -->
+    <!-- Source: customer web inquiry -> Target: sales back-end, via VM queue (Mule's native queue channel) -->
+
+    <flow name="customer-inquiry-flow" doc:name="customer-inquiry-flow">
+        <http:listener doc:name="Listener" config-ref="HTTP_Listener_config_8081" path="/vehicle-inquiry"/>
+        <logger level="INFO" doc:name="Logger" message="Received vehicle inquiry: #[payload]"/>
+        <vm:publish doc:name="Publish to Sales Queue" config-ref="VM_Config" queueName="sales-inquiry-queue"/>
+    </flow>
+
+    <flow name="sales-department-flow" doc:name="sales-department-flow">
+        <vm:listener doc:name="Listener" config-ref="VM_Config" queueName="sales-inquiry-queue"/>
+        <logger level="INFO" doc:name="Logger" message="Sales department received inquiry: #[payload]"/>
+    </flow>
+
+    <!-- ===================== TASK 2: CONTENT-BASED ROUTING ===================== -->
+
+    <flow name="inquiry-router-flow" doc:name="inquiry-router-flow">
+        <http:listener doc:name="Listener" config-ref="HTTP_Listener_config_8082" path="/route-inquiry"/>
+        <choice doc:name="Choice">
+            <when expression="#[payload.inquiryType == 'New Vehicle Inquiry']">
+                <logger level="INFO" doc:name="Logger" message="Routed to New Vehicle Sales: #[payload]"/>
+            </when>
+            <when expression="#[payload.inquiryType == 'Trade-In Request']">
+                <logger level="INFO" doc:name="Logger" message="Routed to Trade-In Department: #[payload]"/>
+            </when>
+            <otherwise>
+                <logger level="INFO" doc:name="Logger" message="Routed to Financing Department: #[payload]"/>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- ===================== TASK 3: AGGREGATOR ===================== -->
+    <!-- Combine Inventory + Financing + Insurance data into one order/quote summary -->
+
+    <flow name="quote-aggregator-flow" doc:name="quote-aggregator-flow">
+        <http:listener doc:name="Listener" config-ref="HTTP_Listener_config_8083" path="/vehicle-quote"/>
+        <logger level="INFO" doc:name="Logger - Request Received" message="Building combined quote for: #[payload]"/>
+
+        <scatter-gather doc:name="Scatter-Gather">
+            <route>
+                <set-payload value="#[%dw 2.0
+output application/json
+---
+{
+    source: 'InventorySystem',
+    vehicleModel: payload.vehicleModel default 'Toyota Vios',
+    availability: 'In Stock',
+    unitPrice: 850000
+}]" doc:name="Set Payload - Inventory"/>
+            </route>
+            <route>
+                <set-payload value="#[%dw 2.0
+output application/json
+---
+{
+    source: 'FinancingPartner',
+    approvedTerm: '48 months',
+    monthlyAmortization: 18500
+}]" doc:name="Set Payload - Financing"/>
+            </route>
+            <route>
+                <set-payload value="#[%dw 2.0
+output application/json
+---
+{
+    source: 'InsurancePartner',
+    coverageType: 'Comprehensive',
+    annualPremium: 32000
+}]" doc:name="Set Payload - Insurance"/>
+            </route>
+        </scatter-gather>
+
+        <ee:transform doc:name="Aggregate Combined Quote">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    quoteSummary: {
+        inventory: payload."0".payload,
+        financing: payload."1".payload,
+        insurance: payload."2".payload
+    }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <logger level="INFO" doc:name="Logger - Aggregated Quote" message="Aggregated quote: #[payload]"/>
+    </flow>
+
+    <!-- ===================== TASK 4: MESSAGE TRANSLATOR ===================== -->
+    <!-- FIXED: source sends XML, target needs JSON -->
+
+    <flow name="message-translator-flow" doc:name="message-translator-flow">
+        <http:listener doc:name="Listener" config-ref="HTTP_Listener_config_8084" path="/translate-dms"/>
+        <logger level="INFO" doc:name="Logger - XML Input" message="XML payload received: #[payload]"/>
+
+        <ee:transform doc:name="Transform XML to JSON">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+input payload application/xml
+output application/json
+---
+{
+    customerName: payload.CustomerRecord.FullName,
+    vehicleModel: payload.CustomerRecord.VehicleOfInterest,
+    inquiryType: payload.CustomerRecord.InquiryCategory,
+    source: "CRM"
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <logger level="INFO" doc:name="Logger - JSON Output" message="Translated JSON output: #[payload]"/>
+    </flow>
+
+    <!-- ===================== TASK 5: ERROR HANDLING ===================== -->
+    <!-- FIXED: adds retry-with-interval (until-successful) + dedicated error queue -->
+
+    <flow name="financing-request-flow" doc:name="financing-request-flow">
+        <http:listener doc:name="Listener" config-ref="HTTP_Listener_config_8085" path="/financing-request"/>
+        <logger level="INFO" doc:name="Logger - Request Received" message="Financing request received: #[payload]"/>
+
+        <try doc:name="Try">
+            <until-successful maxRetries="3" millisBetweenRetries="3000" doc:name="Retry Financing Partner Call">
+                <choice doc:name="Choice - Simulate Partner Down">
+                    <when expression="#[payload.simulateFailure == true]">
+                        <raise-error type="APP:FINANCING_PARTNER_UNAVAILABLE" description="Financing partner API did not respond" doc:name="Raise Error"/>
+                    </when>
+                    <otherwise>
+                        <set-payload value="#[%dw 2.0
+output application/json
+---
+{
+    status: 'APPROVED',
+    approvedTerm: '48 months',
+    monthlyAmortization: 18500
+}]" doc:name="Set Payload - Success"/>
+                    </otherwise>
+                </choice>
+            </until-successful>
+            <error-handler>
+                <on-error-continue type="ANY" doc:name="On Retries Exhausted - Send to Error Queue">
+                    <logger level="ERROR" doc:name="Logger - Retries Exhausted" message="All retries failed. Sending to error queue: #[error.description]"/>
+                    <vm:publish doc:name="Publish to Error Queue" config-ref="VM_Config" queueName="financing-error-queue"/>
+                    <set-payload value="#[%dw 2.0
+output application/json
+---
+{
+    status: 'FAILED',
+    message: 'Financing partner unavailable after retries. Moved to error queue for later reprocessing.'
+}]" doc:name="Set Payload - Fallback Response"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+
+        <logger level="INFO" doc:name="Logger - Final Response" message="Final response: #[payload]"/>
+    </flow>
+
+    <flow name="financing-error-queue-flow" doc:name="financing-error-queue-flow">
+        <vm:listener doc:name="Listener" config-ref="VM_Config" queueName="financing-error-queue"/>
+        <logger level="WARN" doc:name="Logger - Error Queue" message="Message landed in error queue for reprocessing: #[payload]"/>
+    </flow>
+
+</mule>
